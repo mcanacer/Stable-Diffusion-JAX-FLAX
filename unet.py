@@ -149,8 +149,8 @@ class UNet(nn.Module):
 
                 x = AttentionBlock(
                     n_heads=self.attn_heads,
-                    use_self= 2 ** i in self.attn_strides,
-                    use_cross=True
+                    use_self=2 ** i in self.attn_strides,
+                    use_cross=context is not None,
                 )(x, context)
 
             if i != n_blocks - 1:
@@ -163,7 +163,7 @@ class UNet(nn.Module):
             x = AttentionBlock(
                 n_heads=self.attn_heads,
                 use_self=True,
-                use_cross=True
+                use_cross=context is not None,
             )(x, context)
 
         # Decoder
@@ -179,7 +179,7 @@ class UNet(nn.Module):
                 x = AttentionBlock(
                     n_heads=self.attn_heads,
                     use_self=2 ** i in self.attn_strides,
-                    use_cross=True
+                    use_cross=context is not None,
                 )(x, context)
 
         x = nn.GroupNorm(num_groups=32)(x)

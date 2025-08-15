@@ -1,0 +1,49 @@
+dataset_params:
+  dataset: 'coco'
+  img_size: 128
+  batch_size: 64
+  num_workers: 4
+  params:
+    dataset_dir: coco
+    ann_file_path: ann
+    max_length: 77
+
+model:
+  learning_rate: 2e-5
+  seed: 61
+  target: unet.UNet
+  condition_config:
+    types: ['text']
+    text_config:
+      model_name: 'clip_model_name: openai/clip-vit-base-patch32'
+      cond_drop_prob: 0.1
+  params:
+    channel: 128
+    channel_multiplier: [1, 2, 2, 4, 4]
+    num_res_block: 2
+    attn_strides: [8, 16]
+    attn_heads: 1
+  checkpoint_path: diffusion.pkl
+  epochs: 100
+  ema_decay: 0.9999
+
+sampler:
+  params:
+    sampler_type: 'DDPM'
+    total_timesteps: 1000
+    beta_start: 0.0015
+    beta_end: 0.0195
+    schedule_type: 'linear'
+
+vqmodel:
+  target: model.VQModel
+  params:
+    embedding_dim: 256
+    num_embeddings: 8192
+    output_channels: 3
+    channel_multipliers: [1, 2, 2, 4]
+  checkpoint_path: /content/drive/MyDrive/Stable-Diffusion/vqmodel.pkl
+
+wandb:
+  project: 'Stable-Diffusion'
+  name: 'Diffusion Coco-Text2Image'

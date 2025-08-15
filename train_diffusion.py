@@ -8,12 +8,13 @@ import optax
 from flax import serialization
 from torchvision import transforms
 from datasets import load_dataset
-from dataset import HuggingFace
+from dataset import HuggingFace, CocoDataset
 from torch.utils.data import DataLoader
 import wandb
 from model import VQModel
 from unet import UNet
 from sampler import DDPMSampler
+from transformers import CLIPTokenizer, CLIPTextModel
 
 import numpy as np
 
@@ -39,7 +40,7 @@ def ema_update(ema_params, new_params, decay):
 
 
 def make_update_fn(*, diff_apply_fn, vq_apply_fn, vqmodel_method, optimizer, sampler, ema_decay):
-    def update_fn(params, opt_state, vqmodel_params, images, rng, ema_params):
+    def update_fn(params, opt_state, vqmodel_params, images, context, rng, ema_params):
         def loss_fn(params):
             time_rng, sample_rng = jax.random.split(rng, 2)
 
@@ -47,9 +48,9 @@ def make_update_fn(*, diff_apply_fn, vq_apply_fn, vqmodel_method, optimizer, sam
 
             latent_images = vq_apply_fn(vqmodel_params, images, method=vqmodel_method)
             noisy_image, noise = sampler.add_noise(rng, latent_images, timesteps)
-            predicted_noise = diff_apply_fn(params, noisy_image, timesteps)
+            predicted_noise = diff_apply_fn(params, noisy_image, timesteps, context)
 
-            loss = jnp.sum((predicted_noise - noise) ** 2)
+            loss = jnp.mean((predicted_noise - noise) ** 2)
 
             return loss
 
@@ -93,10 +94,34 @@ def main(config_path):
         transforms.Lambda(lambda x: x.permute(1, 2, 0)),  # Convert [C, H, W] to [H, W, C]
     ])
 
-    train_dataset = HuggingFace(
-        dataset=load_dataset("flwrlabs/celeba", split='train'),
-        transform=transform,
-    )
+    tokenizer = None
+    text_model = None
+    text_drop_prob = 0.0
+
+    if diffusion_config['condition_config'] is not None:
+        condition_config = diffusion_config['condition_config']
+        if 'text' in condition_config['types']:
+            model_name = condition_config['text_config']['model_name']
+            text_drop_prob = condition_config['text_config']['text_drop_prob']
+            tokenizer = CLIPTokenizer.from_pretrained(model_name)
+            text_model = CLIPTextModel.from_pretrained(model_name)
+
+    if dataset_params['dataset'] == 'celeba':
+        train_dataset = HuggingFace(
+            dataset=load_dataset("flwrlabs/celeba", split='train'),
+            transform=transform,
+        )
+    elif dataset_params['dataset'] == 'coco':
+        train_dataset = CocoDataset(
+            dataset_dir=dataset_params['params']['dataset_dir'],
+            annotation_file_path=dataset_params['params']['ann_file_path'],
+            transform=transform,
+            tokenizer=tokenizer,
+            text_model=text_model,
+            text_drop_prob=text_drop_prob,
+        )
+    else:
+        raise 'There is no such dataset'
 
     train_loader = DataLoader(
         train_dataset,
@@ -133,8 +158,14 @@ def main(config_path):
 
     inputs = next(iter(train_loader))
 
-    fake_timesteps = jax.random.randint(other_key, minval=0, maxval=sampler.total_timesteps, shape=(inputs.shape[0],))
-    params = diffusion.init(sub_key, inputs, fake_timesteps)
+    if diffusion_config['condition_config']['text'] is not None:
+        images, context = inputs
+    else:
+        images = inputs
+        context = None
+
+    fake_timesteps = jax.random.randint(other_key, minval=0, maxval=sampler.total_timesteps, shape=(images.shape[0],))
+    params = diffusion.init(sub_key, inputs, fake_timesteps, context)
 
     opt_state = optimizer.init(params)
 
@@ -142,7 +173,7 @@ def main(config_path):
     replicate = lambda tree: jax.device_put_replicated(tree, devices)
     unreplicate = lambda tree: jax.tree_util.tree_map(lambda x: x[0], tree)
 
-    ema_decay = 0.9999
+    ema_decay = diffusion_config['ema_decay']
     ema_params = params
     ema_params_repl = replicate(ema_params)
 
@@ -191,8 +222,15 @@ def main(config_path):
         return jnp.reshape(inputs, (num_devices * batch_size, *shape))
 
     for epoch in range(start_epoch, epochs):
-        for step, images in enumerate(train_loader):
+        for step, inputs in enumerate(train_loader):
             key, sample_rng = jax.random.split(key, 2)
+
+            if diffusion_config['condition_config']['text'] is not None:
+                images, context = inputs
+                context = jax.tree_util.tree_map(lambda x: shard(np.array(x)), context)
+            else:
+                images = inputs
+                context = None
 
             images = jax.tree_util.tree_map(lambda x: shard(np.array(x)), images)
             rng_shard = jax.random.split(sample_rng, num_devices)
@@ -207,6 +245,7 @@ def main(config_path):
                 opt_state_repl,
                 vqmodel_params,
                 images,
+                context,
                 rng_shard,
                 ema_params_repl,
             )
