@@ -55,29 +55,57 @@ class ResidualBlock(nn.Module):
         return x + residual
 
 
-class Attention(nn.Module):
-    n_heads: int = 1
+class CrossAttention(nn.Module):
+    n_heads: int = 8
 
     @nn.compact
-    def __call__(self, inputs):
-        N, H, W, C = inputs.shape
-        x = inputs.reshape(N, H * W, C)
+    def __call__(self, x, context):
+        N, H, W, C = x.shape
+        q = x.reshape(N, H * W, C)  # [N, HW, C]
+        context_proj = nn.Dense(C)(context)  # [N, seq_len, C]
 
-        attention_mask = nn.make_attention_mask(
-            jnp.ones((N, H * W), dtype=jnp.int32),
-            jnp.ones((N, H * W), dtype=jnp.int32)
-        )
-
-        x = nn.SelfAttention(
+        attn = nn.MultiHeadDotProductAttention(
             num_heads=self.n_heads,
             qkv_features=C,
             out_features=C,
-            dropout_rate=0.0,
-            deterministic=True
-        )(x, attention_mask)
+        )(q, context_proj)  # [N, HW, C]
 
-        x = x.reshape(N, H, W, C)
-        return nn.GroupNorm(num_groups=32, dtype=jnp.float32)(x)
+        out = attn.reshape(N, H, W, C)
+        return out
+
+
+class SelfAttention(nn.Module):
+    n_heads: int = 8
+
+    @nn.compact
+    def __call__(self, x):
+        N, H, W, C = x.shape
+        qkv = x.reshape(N, H * W, C)
+        attn = nn.MultiHeadDotProductAttention(
+            num_heads=self.n_heads,
+            qkv_features=C,
+            out_features=C
+        )(qkv, qkv)
+        out = attn.reshape(N, H, W, C)
+        return out
+
+
+class AttentionBlock(nn.Module):
+    n_heads: int = 8
+    use_self: bool = True
+    use_cross: bool = True
+
+    @nn.compact
+    def __call__(self, x, context=None):
+        C = x.shape[-1]
+        out = x
+        if self.use_self:
+            out = nn.GroupNorm(num_groups=32)(out)
+            out = out + SelfAttention(n_heads=self.n_heads)(out)
+        if self.use_cross and context is not None:
+            out = nn.GroupNorm(num_groups=32)(out)
+            out = out + CrossAttention(n_heads=self.n_heads)(out, context)
+        return out
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -101,7 +129,7 @@ class UNet(nn.Module):
     attn_heads: int = 1
 
     @nn.compact
-    def __call__(self, images, timesteps):
+    def __call__(self, images, timesteps, context=None):
         t = SinusoidalPosEmb(self.channel)(timesteps)
         t = nn.Dense(self.channel * 4)(t)
         t = jax.nn.swish(t)
@@ -119,8 +147,11 @@ class UNet(nn.Module):
                 channel_mul = self.channel * self.channel_multiplier[i]
                 x = ResidualBlock(filters=channel_mul)(x, time_embeds)
 
-                if 2 ** i in self.attn_strides:
-                    x = Attention(n_heads=self.attn_heads)(x)
+                x = AttentionBlock(
+                    n_heads=self.attn_heads,
+                    use_self= 2 ** i in self.attn_strides,
+                    use_cross=True
+                )(x, context)
 
             if i != n_blocks - 1:
                 feats.append(x)
@@ -129,6 +160,11 @@ class UNet(nn.Module):
         # Bottleneck
         for _ in range(self.n_res_block):
             x = ResidualBlock(filters=x.shape[-1])(x, time_embeds)
+            x = AttentionBlock(
+                n_heads=self.attn_heads,
+                use_self=True,
+                use_cross=True
+            )(x, context)
 
         # Decoder
         for i in reversed(range(n_blocks - 1)):
@@ -140,8 +176,11 @@ class UNet(nn.Module):
                 channel_mul = self.channel * self.channel_multiplier[i]
                 x = ResidualBlock(filters=channel_mul)(x, time_embeds)
 
-                if 2 ** i in self.attn_strides:
-                    x = Attention(n_heads=self.attn_heads)(x)
+                x = AttentionBlock(
+                    n_heads=self.attn_heads,
+                    use_self=2 ** i in self.attn_strides,
+                    use_cross=True
+                )(x, context)
 
         x = nn.GroupNorm(num_groups=32)(x)
         x = jax.nn.swish(x)
@@ -153,7 +192,7 @@ class UNet(nn.Module):
 if __name__ == '__main__':
     key = jax.random.PRNGKey(0)
     sub_key = jax.random.PRNGKey(1)
-    model = UNet([1, 1, 2, 2, 4, 4], [16])
+    model = UNet([1, 2, 2, 4, 4], [2, 4], attn_heads=32)
     fake_timesteps = jax.random.randint(sub_key, minval=0, maxval=1000, shape=(2,))
-    fake_images = jnp.ones((2, 128, 128, 3), dtype=jnp.float32)
+    fake_images = jnp.ones((2, 16, 16, 4), dtype=jnp.float32)
     params = model.init(key, fake_images, fake_timesteps)

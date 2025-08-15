@@ -54,18 +54,24 @@ def sigmoid_cross_entropy_with_logits(logits, labels):
 def make_generator_update_fn(*, vqgan_apply_fn, vqgan_optimizer, disc_apply_fn, lpips_apply_fn, ema_decay, disc_start):
     def update_fn(vqgan_params, vqgan_opt_state, disc_params, lpips_params, images, ema_params, global_step):
         def loss_fn(params):
-            images_recon, quantized_latents, commitment_loss, embedding_loss, enc_indices = vqgan_apply_fn(params,
-                                                                                                           images)
+            (
+                images_recon,
+                quantized_latents,
+                commitment_loss,
+                embedding_loss,
+                ent_loss,
+                enc_indices,
+            ) = vqgan_apply_fn(params, images)
 
             disc_factor = adopt_weight(global_step, disc_start)
             disc_fake = disc_apply_fn(disc_params, images_recon)
 
             recon_loss = jnp.mean(jnp.abs(images_recon - images))
-            perceptual_loss = 0.1 * lpips_apply_fn(lpips_params, images, images_recon)
+            perceptual_loss = 0.1 * lpips_apply_fn(lpips_params, images, images_recon).sum()
 
             g_loss = disc_factor * 0.1 * sigmoid_cross_entropy_with_logits(disc_fake, jnp.ones_like(disc_fake)).mean()
 
-            losses = recon_loss, commitment_loss, embedding_loss, perceptual_loss, g_loss
+            losses = recon_loss, commitment_loss, embedding_loss, perceptual_loss, g_loss, ent_loss
             loss = jax.tree_util.tree_reduce(operator.add, losses)
 
             return loss, (losses, images_recon, enc_indices)
@@ -290,7 +296,7 @@ def main(config_path):
 
             loss = unreplicate(vq_loss)
             losses = [jnp.asarray(x) for x in unreplicate(vq_losses)]
-            recon_loss, commitment_loss, embedding_loss, perceptual_loss, g_loss = losses
+            recon_loss, commitment_loss, embedding_loss, perceptual_loss, g_loss, ent_loss = losses
 
             if global_step % 1000 == 0:
                 import matplotlib.pyplot as plt
@@ -325,6 +331,7 @@ def main(config_path):
                 "embedding_loss": embedding_loss,
                 "perceptual_loss": perceptual_loss,
                 "g_loss": g_loss,
+                "ent_loss": ent_loss,
                 'disc_loss': unreplicate(disc_loss),
                 "total_loss": loss,
                 "epoch": epoch,

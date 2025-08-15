@@ -5,6 +5,29 @@ import jax.numpy as jnp
 import flax.linen as nn
 
 
+def entropy_loss(affinity, loss_type="softmax", temperature=1.0):
+    """Calculates the entropy loss."""
+    flat_affinity = affinity.reshape(-1, affinity.shape[-1])
+    flat_affinity /= temperature
+    probs = jax.nn.softmax(flat_affinity, axis=-1)
+    log_probs = jax.nn.log_softmax(flat_affinity + 1e-5, axis=-1)
+    if loss_type == "softmax":
+        target_probs = probs
+    elif loss_type == "argmax":
+        codes = jnp.argmax(flat_affinity, axis=-1)
+        onehots = jax.nn.one_hot(
+            codes, flat_affinity.shape[-1], dtype=flat_affinity.dtype)
+        onehots = probs - jax.lax.stop_gradient(probs - onehots)
+        target_probs = onehots
+    else:
+        raise ValueError("Entropy loss {} not supported".format(loss_type))
+    avg_probs = jnp.mean(target_probs, axis=0)
+    avg_entropy = -jnp.sum(avg_probs * jnp.log(avg_probs + 1e-5))
+    sample_entropy = -jnp.mean(jnp.sum(target_probs * log_probs, axis=-1))
+    loss = sample_entropy - avg_entropy
+    return loss
+
+
 class ResidualBlock(nn.Module):
     filters: int
 
@@ -27,7 +50,7 @@ class ResidualBlock(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    n_heads: int = 1
+    n_heads: int = 4
 
     @nn.compact
     def __call__(self, x):
@@ -53,6 +76,7 @@ class Encoder(nn.Module):
     attn_resolutions: Sequence[int]
     filters: int = 128
     num_res_block: int = 2
+    n_heads: int = 1
 
     @nn.compact
     def __call__(self, x):
@@ -65,7 +89,7 @@ class Encoder(nn.Module):
             for _ in range(self.num_res_block):
                 x = ResidualBlock(filters)(x)
                 if resolution in self.attn_resolutions:
-                    x = AttentionBlock()(x)
+                    x = AttentionBlock(n_heads=self.n_heads)(x)
             if i < num_blocks - 1:
                 x = nn.Conv(features=filters, kernel_size=(4, 4), strides=(2, 2))(x)
                 resolution = resolution // 2
@@ -86,6 +110,7 @@ class Decoder(nn.Module):
     attn_resolutions: Sequence[int]
     filters: int = 128
     num_res_block: int = 2
+    n_heads: int = 1
 
     @nn.compact
     def __call__(self, x):
@@ -98,14 +123,14 @@ class Decoder(nn.Module):
         for _ in range(self.num_res_block):
             x = ResidualBlock(filters)(x)
             if resolution in self.attn_resolutions:
-                x = AttentionBlock()(x)
+                x = AttentionBlock(n_heads=self.n_heads)(x)
 
         for i in reversed(range(num_blocks)):
             filters = self.filters * self.channel_multipliers[i]
             for _ in range(self.num_res_block):
                 x = ResidualBlock(filters)(x)
                 if resolution in self.attn_resolutions:
-                    x = AttentionBlock()(x)
+                    x = AttentionBlock(n_heads=self.n_heads)(x)
             if i > 0:
                 n, h, w, c = x.shape
                 x = jax.image.resize(x, (n, h * 2, w * 2, c), method='nearest')
@@ -143,12 +168,14 @@ class VectorQuantizer(nn.Module):
         encoding_indices = jnp.argmin(distances, axis=1)  # [NxHxW]
         quantized = codebook[encoding_indices]  # [NxHxW, D]
 
+        ent_loss = 0.1 * entropy_loss(-distances, temperature=0.01)
+
         quantized = jnp.reshape(quantized, z_e.shape)  # [N, H, W, D]
         commitment_loss = self.commitment_cost * jnp.mean((jax.lax.stop_gradient(quantized) - z_e) ** 2)
         embedding_loss = jnp.mean((quantized - jax.lax.stop_gradient(z_e)) ** 2)
 
         quantized = z_e + jax.lax.stop_gradient(quantized - z_e)
-        return quantized, commitment_loss, embedding_loss, encoding_indices
+        return quantized, commitment_loss, embedding_loss, ent_loss, encoding_indices
 
 
 class VQModel(nn.Module):
@@ -158,12 +185,14 @@ class VQModel(nn.Module):
     commitment_cost: float = 0.25
     output_channels: int = 3
     attn_resolutions: Sequence[int] = (16,)
+    n_heads: int = 1
 
     def setup(self):
         self.encoder = Encoder(
             latent_dim=self.embedding_dim,
             channel_multipliers=self.channel_multipliers,
             attn_resolutions=self.attn_resolutions,
+            n_heads=self.n_heads,
         )
         self.quantizer = VectorQuantizer(
             embedding_dim=self.embedding_dim,
@@ -174,20 +203,27 @@ class VQModel(nn.Module):
             output_channels=self.output_channels,
             channel_multipliers=self.channel_multipliers,
             attn_resolutions=self.attn_resolutions,
+            n_heads=self.n_heads,
         )
 
+        self.quant_conv = nn.Conv(self.embedding_dim, kernel_size=(1, 1))
+        self.post_quant_conv = nn.Conv(self.embedding_dim, kernel_size=(1, 1))
+
     def __call__(self, x):
-        z_e = self.encoder(x)
-        z_q, commitment_loss, embedding_loss, enc_indices = self.quantizer(z_e)
+        encoded = self.encoder(x)
+        z_e = self.quant_conv(encoded)
+        z_q, commitment_loss, embedding_loss, ent_loss, enc_indices = self.quantizer(z_e)
+        z_q = self.post_quant_conv(z_q)
         x_recon = self.decoder(z_q)
-        return x_recon, z_q, commitment_loss, embedding_loss, enc_indices
+        return x_recon, z_q, commitment_loss, embedding_loss, ent_loss, enc_indices
 
     def encode(self, x):
-        z_e = self.encoder(x)  # [N, H, W, D]
-        z_q, commitment_loss, embedding_loss, enc_indices = self.quantizer(z_e)
+        encoded = self.encoder(x)  # [N, H, W, D]
+        z_e = self.quant_conv(encoded)
+        z_q, commitment_loss, embedding_loss, ent_loss, enc_indices = self.quantizer(z_e)
         return z_q  # [N, H, W, D]
 
     def decode(self, x):
-        # x: [N, H, W]
-        features = jnp.take(self.quantizer.variables['params']['codebook'], x, axis=0)
-        return self.decoder(features)
+        # x: [N, H, W, D]
+        x = self.post_quant_conv(x)
+        return self.decoder(x)
