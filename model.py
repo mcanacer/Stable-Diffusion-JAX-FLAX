@@ -5,6 +5,9 @@ import jax.numpy as jnp
 import flax.linen as nn
 
 
+# https://github.com/google-research/maskgit
+
+
 def entropy_loss(affinity, loss_type="softmax", temperature=1.0):
     """Calculates the entropy loss."""
     flat_affinity = affinity.reshape(-1, affinity.shape[-1])

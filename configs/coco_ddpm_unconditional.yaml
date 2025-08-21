@@ -8,36 +8,38 @@ dataset_params:
     ann_file_path: /content/annotations/captions_train2017.json
 
 model:
-  learning_rate: 4.5e-06
-  b1: 0.5
-  b2: 0.9
+  learning_rate: 2.0e-6
+  seed: 61
+  target: 'UNet'
+  params:
+    channel: 128
+    channel_multiplier: [1, 2, 2, 4, 4]
+    n_res_block: 2
+    attn_strides: [2]
+    attn_heads: 32
+  checkpoint_path: /content/drive/MyDrive/Stable-Diffusion/coco_diffusion.pkl
+  epochs: 200
+  ema_decay: 0.9999
+
+sampler:
+  sampler_type: 'DDPM'
+  params:
+    total_timesteps: 1000
+    beta_start: 0.0015
+    beta_end: 0.0195
+    schedule_type: 'linear'
+
+vqmodel:
   target: model.VQModel
-  seed: 42
   params:
     embedding_dim: 4
     num_embeddings: 16384
     output_channels: 3
-    commitment_cost: 0.25
     channel_multipliers: [1, 2, 2, 4]
     attn_resolutions: [32]
     n_heads: 4
   checkpoint_path: /content/drive/MyDrive/Stable-Diffusion/vqmodel_coco.pkl
-  epochs: 250
-  ema_decay: 0.9999
-
-discriminator:
-  learning_rate: 4.5e-06
-  b1: 0.5
-  b2: 0.9
-  target: discriminator.discriminator
-  params:
-    channel_multipliers: [1, 2, 4, 8]
-    base_channels: 64
-  disc_start: 5000
-
-lpips:
-  target: lpips.LPIPS
 
 wandb:
   project: 'Stable-Diffusion'
-  name: 'vq-model coco'
+  name: 'Diffusion coco'

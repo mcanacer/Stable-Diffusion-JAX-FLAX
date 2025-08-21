@@ -29,78 +29,71 @@ class CocoDataset(torch.utils.data.Dataset):
         tokenizer=None,
         text_model=None,
         text_drop_prob=0.0,
-        max_length=77
+        max_length=77,
     ):
-        super(CocoDataset, self).__init__()
-
+        super().__init__()
         self.dataset_dir = dataset_dir
         self.tokenizer = tokenizer
         self.text_model = text_model
-        self.text_drop_prob = text_drop_prob
+        self.text_drop_prob = float(text_drop_prob)
         self.max_length = max_length
+        self.image_transforms = transform
 
-        if self.tokenizer is not None:
-            token = self.tokenizer(
-                '',
-                padding="max_length",
-                truncation=True,
-                max_length=self.max_length,
-                return_attention_mask=True,
-            )
-
-            indexed_tokens = token['input_ids']
-            att_masks = token['attention_mask']
-
-            indexed_tokens = torch.tensor(indexed_tokens)
-            att_masks = torch.tensor(att_masks)
-
-            self.empty_text_embed = text_model(indexed_tokens, att_masks).last_hidden_state
+        # Precompute empty text embedding
+        if self.tokenizer is not None and self.text_model is not None:
+            self.text_model.eval()
+            with torch.no_grad():
+                tokens = self.tokenizer(
+                    "",
+                    padding="max_length",
+                    truncation=True,
+                    max_length=self.max_length,
+                    return_attention_mask=True,
+                    return_tensors="pt",
+                )
+                self.empty_text_embed = self.text_model(
+                    input_ids=tokens["input_ids"],
+                    attention_mask=tokens["attention_mask"],
+                ).last_hidden_state  # [1, max_len, hidden]
 
         self.coco = COCO(annotation_file_path)
         self.ids = list(sorted(self.coco.imgs.keys()))
-
-        self.image_transforms = transform
 
     def __len__(self):
         return len(self.ids)
 
     def __getitem__(self, index):
-        coco = self.coco
         img_id = self.ids[index]
-
-        path = coco.loadImgs(img_id)[0]['file_name']
+        path = self.coco.loadImgs(img_id)[0]["file_name"]
         img_path = os.path.join(self.dataset_dir, path)
-        image = Image.open(img_path).convert('RGB')
-        image = self.image_transforms(image)
 
-        ann_ids = coco.getAnnIds(imgIds=img_id)
-        captions = coco.loadAnns(ann_ids)
-        caption = random.choice(captions)['caption']
+        image = Image.open(img_path).convert("RGB")
+        if self.image_transforms:
+            image = self.image_transforms(image)
 
-        if self.tokenizer:
+        ann_ids = self.coco.getAnnIds(imgIds=img_id)
+        captions = self.coco.loadAnns(ann_ids)
+        caption = random.choice(captions)["caption"]
+
+        if self.tokenizer is None or self.text_model is None:
+            return image
+
+        with torch.no_grad():
             tokens = self.tokenizer(
                 caption,
                 padding="max_length",
                 truncation=True,
                 max_length=self.max_length,
                 return_attention_mask=True,
+                return_tensors="pt",
             )
-
-            input_ids = tokens['input_ids']
-            attention_mask = tokens['attention_mask']
-
-            input_ids = torch.tensor(input_ids)
-            attention_mask = torch.tensor(attention_mask)
-
             text_embed = self.text_model(
-                input_ids,
-                attention_mask,
-            ).last_hidden_state
+                input_ids=tokens["input_ids"],
+                attention_mask=tokens["attention_mask"],
+            ).last_hidden_state  # [1, max_len, hidden]
 
-            if self.text_drop_prob > 0:
-                text_drop_mask = torch.zeros((image.shape[0])).float().uniform(0, 1) < self.text_drop_prob
-                text_embed[text_drop_mask, ...] = self.empty_text_embed[0]
+            # dropout
+            if random.random() < self.text_drop_prob:
+                text_embed = self.empty_text_embed.clone()
 
-            return image, text_embed
-        else:
-            return image
+        return image, text_embed.squeeze(0)  # [max_len, hidden]

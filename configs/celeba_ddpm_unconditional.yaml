@@ -1,24 +1,27 @@
 dataset_params:
+  dataset: 'celeba'
   img_size: 128
-  batch_size: 64
+  batch_size: 16
   num_workers: 4
 
 model:
-  learning_rate: 2e-5
+  learning_rate: 1e-4
   seed: 61
-  target: unet.UNet
+  target: 'DiT'
+  condition_config:
   params:
-    channel: 128
-    num_res_block: 2
-    attn_strides: [16]
-    attn_heads: 1
-  checkpoint_path: diffusion.pkl
+    patch_size: 2
+    hidden_size: 768
+    num_layers: 12
+    num_heads: 12
+    out_channels: 4
+  checkpoint_path: /content/drive/MyDrive/Stable-Diffusion/diffusion.pkl
   epochs: 100
   ema_decay: 0.9999
 
 sampler:
+  sampler_type: 'DDPM'
   params:
-    sampler_type: 'DDPM'
     total_timesteps: 1000
     beta_start: 0.0001
     beta_end: 0.02
@@ -27,10 +30,12 @@ sampler:
 vqmodel:
   target: model.VQModel
   params:
-    embedding_dim: 256
-    num_embeddings: 8192
+    embedding_dim: 4
+    num_embeddings: 16384
     output_channels: 3
     channel_multipliers: [1, 2, 2, 4]
+    attn_resolutions: [32]
+    n_heads: 4
   checkpoint_path: /content/drive/MyDrive/Stable-Diffusion/vqmodel.pkl
 
 wandb:

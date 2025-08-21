@@ -15,6 +15,7 @@ from model import VQModel
 from unet import UNet
 from sampler import DDPMSampler
 from transformers import CLIPTokenizer, CLIPTextModel
+from dit import DiT
 
 import numpy as np
 
@@ -47,7 +48,7 @@ def make_update_fn(*, diff_apply_fn, vq_apply_fn, vqmodel_method, optimizer, sam
             timesteps = jax.random.randint(time_rng, minval=0, maxval=sampler.total_timesteps, shape=(images.shape[0],))
 
             latent_images = vq_apply_fn(vqmodel_params, images, method=vqmodel_method)
-            noisy_image, noise = sampler.add_noise(rng, latent_images, timesteps)
+            noisy_image, noise = sampler.add_noise(sample_rng, latent_images, timesteps)
             predicted_noise = diff_apply_fn(params, noisy_image, timesteps, context)
 
             loss = jnp.mean((predicted_noise - noise) ** 2)
@@ -133,11 +134,17 @@ def main(config_path):
 
     vqmodel = VQModel(**vqmodel_config['params'])
 
-    diffusion = UNet(**diffusion_config['params'])
-    sampler = DDPMSampler(**sampler_config)
+    if diffusion_config['target'] == 'DiT':
+      diffusion = DiT(**diffusion_config['params'])
+    elif diffusion_config['target'] == 'UNet':
+      diffusion = UNet(**diffusion_config['params'])
+    else:
+      raise 'There is no such model'
+
+    sampler = DDPMSampler(**sampler_config['params'])
 
     optimizer = optax.chain(
-        optax.adam(learning_rate=diffusion_config['learning_rate'])
+        optax.adam(learning_rate=float(diffusion_config['learning_rate']))
     )
 
     epochs = diffusion_config['epochs']
@@ -158,14 +165,14 @@ def main(config_path):
 
     inputs = next(iter(train_loader))
 
-    if diffusion_config['condition_config']['text'] is not None:
+    if diffusion_config['condition_config'] is not None:
         images, context = inputs
     else:
         images = inputs
         context = None
 
     fake_timesteps = jax.random.randint(other_key, minval=0, maxval=sampler.total_timesteps, shape=(images.shape[0],))
-    params = diffusion.init(sub_key, inputs, fake_timesteps, context)
+    params = diffusion.init(sub_key, jnp.ones((images.shape[0], 16, 16, 4)), fake_timesteps, context)
 
     opt_state = optimizer.init(params)
 
@@ -188,9 +195,11 @@ def main(config_path):
 
     params_repl = replicate(params)
     opt_state_repl = replicate(opt_state)
+    vqmodel_params_repl = replicate(vqmodel_params)
 
     del params
     del opt_state
+    del vqmodel_params
 
     num_devices = jax.local_device_count()
 
@@ -225,7 +234,7 @@ def main(config_path):
         for step, inputs in enumerate(train_loader):
             key, sample_rng = jax.random.split(key, 2)
 
-            if diffusion_config['condition_config']['text'] is not None:
+            if diffusion_config['condition_config'] is not None:
                 images, context = inputs
                 context = jax.tree_util.tree_map(lambda x: shard(np.array(x)), context)
             else:
@@ -243,7 +252,7 @@ def main(config_path):
             ) = update_fn(
                 params_repl,
                 opt_state_repl,
-                vqmodel_params,
+                vqmodel_params_repl,
                 images,
                 context,
                 rng_shard,
