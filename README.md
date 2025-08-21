@@ -50,3 +50,11 @@ python train_diffusion.py configs/coco_ddpm_text_conditional.yaml
 ![Generated Image](gen_images/generated_image51.png)
 ![Generated Image](gen_images/generated_image55.png)
 ![Generated Image](gen_images/generated_image57.png)
+
+
+## References
+VQGAN https://github.com/google-research/maskgit
+
+Stable-Diffusion https://github.com/explainingai-code/StableDiffusion-PyTorch
+
+DiT https://github.com/facebookresearch/DiT
