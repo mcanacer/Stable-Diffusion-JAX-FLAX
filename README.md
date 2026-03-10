@@ -63,7 +63,7 @@ Non-trivial details reproduced faithfully from the paper:
 
 ## Project Structure
 ```
-ldm-jax/
+Stable-Diffusion-JAX-FLAX/
 ├── model.py               # VAE / VQ model architecture
 ├── dit.py                 # DiT (Diffusion Transformer) architecture
 ├── unet.py                # UNet architecture
